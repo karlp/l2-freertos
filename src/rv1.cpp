@@ -1,4 +1,3 @@
-// zyp's "I think this is my gd32v miniblink?" https://paste.jvnv.net/raw/Z30Xj
 // plus zyp's "you'll need this too..." https://paste.jvnv.net/raw/14lMz
 
 
@@ -18,16 +17,7 @@
 #include <uart/uart.h>
 
 
-#include "config.h"
-#include "broadcaster.h"
 
-// IMO, we pass MEM_BUF via the bleConfig_t.MEMAddr, so this is free form, but whateves.
-//extern "C" {
-__attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
-const uint8_t MacAddr[6] = {0x84, 0xC2, 0xE4, 0x03, 0x02, 0x02};
-tmosTaskID halTaskID; 
-
-//}
 //// add to laks!!! 
 
 void entry();
@@ -138,95 +128,6 @@ uint32_t rcc_set_pll(uint8_t div)
 }
 #endif
 
-#define LED_BLINK_EVENT       0x0001
-#define HAL_KEY_EVENT         0x0002
-#define HAL_REG_INIT_EVENT    0x2000
-#define HAL_TEST_EVENT        0x4000
-
-
-tmosEvents wch_handle_events(tmosTaskID task_id, tmosEvents events)
-{
-	uint8_t *msgPtr;
-
-	// goog: Process the HAL layer message, call tmos_msg_receive to read the message, and delete the message after processing
-	if (events & SYS_EVENT_MSG) { // 处理HAL层消息，调用tmos_msg_receive读取消息，处理完成后删除消息
-		msgPtr = tmos_msg_receive(task_id);
-		if (msgPtr) {
-			/* De-allocate */
-			tmos_msg_deallocate(msgPtr);
-		}
-		return events ^ SYS_EVENT_MSG;
-	}
-	if (events & LED_BLINK_EVENT) {
-#if(defined HAL_LED) && (HAL_LED == TRUE)
-		HalLedUpdate();
-#endif // HAL_LED
-		return events ^ LED_BLINK_EVENT;
-	}
-	if (events & HAL_KEY_EVENT) {
-#if(defined HAL_KEY) && (HAL_KEY == TRUE)
-		HAL_KeyPoll(); /* Check for keys */
-		tmos_start_task(halTaskID, HAL_KEY_EVENT, MS1_TO_SYSTEM_TIME(100));
-		return events ^ HAL_KEY_EVENT;
-#endif
-	}
-	if (events & HAL_REG_INIT_EVENT) {
-#if(defined BLE_CALIBRATION_ENABLE) && (BLE_CALIBRATION_ENABLE == TRUE) // 校准任务，单次校准耗时小于10ms
-		BLE_RegInit(); // 校准RF (Calibrate RF)
-#if(CLK_OSC32K)
-		Lib_Calibration_LSI(); // 校准内部RC (Calibrate Internal RC)
-#endif
-		return events ^ HAL_REG_INIT_EVENT;
-#endif
-	}
-	if (events & HAL_TEST_EVENT) {
-		printf("* \n");
-		tmos_start_task(halTaskID, HAL_TEST_EVENT, MS1_TO_SYSTEM_TIME(1000));
-		return events ^ HAL_TEST_EVENT;
-	}
-	return 0;
-
-}
-
-uint32_t wch_ble_seed_random(void) {
-	// Hardly the fanciest, but it's enough...
-	return SYSTICK->CNT;
-}
-
-
-void wch_ble_init()
-{
-	// Turn on Systick, we're just going free running.
-	SYSTICK->CMP = 0xFFFFFFFFFFFFFFFF - 1;
-	// init, autoreload, hclk source, and enable.
-	SYSTICK->CTLR = (1<<5) | (1<<3) | (1<<2) | (1<<0);
-	
-
-
-	bleConfig_t cfg = {0}; // is c++ the with or without 0 form? lol
-	cfg.MEMAddr = (uint32_t) MEM_BUF;
-	cfg.MEMLen = (uint32_t) BLE_MEMHEAP_SIZE;
-	cfg.BufMaxLen = (uint32_t) BLE_BUFF_MAX_LEN;
-	cfg.BufNumber = (uint32_t) BLE_BUFF_NUM;
-	cfg.TxNumEvent = (uint32_t) BLE_TX_NUM_EVENT;
-	cfg.TxPower = (uint32_t) BLE_TX_POWER;
-	cfg.ConnectNumber = 0x3 << 2 | 0x3; // max please?
-	// FIXME - shit, I should implementthat?
-	//cfg.srandCB = SYS_GetSysTickCnt;
-	cfg.srandCB = wch_ble_seed_random;
-	// FIXME - selRTCclock?
-	for (int i = 0; i < 6; i++) {
-		cfg.MacAddr[i] = MacAddr[5 - i];
-	}
-	auto i = BLE_LibInit(&cfg);
-	if (i) {
-		printf("LIB init error code: %x ...\n", i);
-		while (1);
-	}
-
-
-}
-
 void hack_rtc_timer_init(void)
 {
 	SYSCFG.unlock_safe();
@@ -261,44 +162,24 @@ int main()
 #if defined(CH58x)
 	utx.set_mode(Pin::Output, Pin::Pull::Floating, Pin::Drive::Low5);
 	urx.set_mode(Pin::Input, Pin::Pull::Up, Pin::Drive::Low5);
+#else
+#warning "unsupportd uart pin init..."
 #endif
 	uart_enable(sys_speed);
 	printf("Booted at %lu\n", sys_speed);
 
 	led.set_mode(Pin::Output, Pin::Pull::Floating, Pin::Drive::Low5);
 
-	// this is hopefully the blob version?
-	printf("%s\n", VER_LIB);
 
 	int i = 0;
 	int qq = 0;
 
 
-	bStatus_t bs;
-	//CH58X_BLEInit();
-	wch_ble_init();
-	//HAL_Init();
-	tmosTaskID halTaskID = TMOS_ProcessEventRegister(wch_handle_events);
-	printf("Created event register: %d\n", halTaskID);
-	// HAL_TimeInit();
-	hack_rtc_timer_init();
-	TMOS_TimerInit(0);
-#if(defined BLE_CALIBRATION_ENABLE) && (BLE_CALIBRATION_ENABLE == TRUE)
-	// goog: "Add calibration tasks, and a single calibration takes less than 10ms"
-	bs = tmos_start_task(halTaskID, HAL_REG_INIT_EVENT, MS1_TO_SYSTEM_TIME(BLE_CALIBRATION_PERIOD)); // 添加校准任务，单次校准耗时小于10ms
-    	printf("task start bl reg returned: %d\n", bs);
+	//?? hack_rtc_timer_init();
 
-#endif
-
-
-	bs = GAPRole_BroadcasterInit();
-	printf("gaprole init returned: %d\n", bs);
-	Broadcaster_Init();
-	//Main_Circulation();
 	uint64_t last = SYSTICK->CNT;
 
 	while (1) {
-		TMOS_SystemProcess();
 		if (SYSTICK->CNT - last > 30000000) {
 			printf("tick: %d\n", i++);
 			last = SYSTICK->CNT;
@@ -322,6 +203,9 @@ void interrupt::handler<interrupt::irq::UART1>()
 		}
 	}
 }
+
+#else
+#warning "unsupported irq handler for uart1"
 
 #endif
 
